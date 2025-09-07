@@ -61,8 +61,59 @@ function raySphere(origin, dir, center, radius) {
   return null;
 }
 
+// --- REGISTRATION ENDPOINT (for debugging) ---
+// This is NOT used by the game client, only for manual registration/testing.
+// You can POST {username, password} to /register to create a user.
+app.post('/register', async (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Missing username or password' });
+  }
+  try {
+    // Check if user exists
+    const exists = await pool.query('SELECT 1 FROM players WHERE username=$1', [username]);
+    if (exists.rows.length > 0) {
+      return res.status(409).json({ error: 'Username already exists' });
+    }
+    const hash = await bcrypt.hash(password, 10);
+    await pool.query(
+      'INSERT INTO players (username, password_hash, kills, deaths) VALUES ($1, $2, 0, 0)',
+      [username, hash]
+    );
+    res.json({ status: 'ok' });
+  } catch (err) {
+    console.error('[DB] registration error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 io.on('connection', (socket) => {
   console.log('[IO] Client connected:', socket.id);
+
+  // Socket registration handler to allow in-game account creation
+  socket.on('register', async (data) => {
+    const { username, password } = data || {};
+    if (!username || !password) {
+      socket.emit('register_error', { message: 'Missing username or password.' });
+      return;
+    }
+    try {
+      const exists = await pool.query('SELECT 1 FROM players WHERE username=$1', [username]);
+      if (exists.rows.length > 0) {
+        socket.emit('register_error', { message: 'Username already exists.' });
+        return;
+      }
+      const hash = await bcrypt.hash(password, 10);
+      await pool.query(
+        'INSERT INTO players (username, password_hash, kills, deaths) VALUES ($1, $2, 0, 0)',
+        [username, hash]
+      );
+      socket.emit('register_success', { status: 'ok' });
+    } catch (err) {
+      console.error('[DB] register (socket) error:', err);
+      socket.emit('register_error', { message: 'Server error. Try again later.' });
+    }
+  });
 
   socket.on('login', async (data) => {
     if (!data || !data.username || !data.password) {
@@ -266,3 +317,11 @@ app.get('/', (req, res) => {
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
+
+// ---
+// Почему регистрация не работает "в игре"?
+// Потому что в этом сервере нет socket.io обработчика события "register".
+// Регистрация реализована только через HTTP POST /register (см. выше).
+// Если клиентская игра не отправляет POST-запрос на /register, а только socket.emit('register', ...),
+// то регистрация не будет работать. Нужно добавить socket.on('register', ...) и соответствующую логику,
+// либо убедиться, что клиент делает POST на /register.
